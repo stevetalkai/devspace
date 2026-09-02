@@ -31,6 +31,7 @@
     "build:app": "vite build",
     "dev": "tsx watch --clear-screen=false src/cli.ts serve",
     "postinstall": "node scripts/fix-node-pty-permissions.mjs",
+    "prepare": "pnpm build",
     "prepack": "pnpm build",
     "schema:config": "tsx scripts/generate-config-schema.ts",
     "start": "node dist/cli.js serve",
