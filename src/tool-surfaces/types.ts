@@ -48,6 +48,13 @@ export interface ToolLogFields {
   workingDirectory?: string;
   command?: string;
   commandLength?: number;
+  files?: string[];
+  additions?: number;
+  removals?: number;
+  sessionId?: number;
+  running?: boolean;
+  exitCode?: number;
+  inputLength?: number;
   success: boolean;
   durationMs: number;
   error?: string;

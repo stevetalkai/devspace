@@ -6,6 +6,7 @@ import {
   SHELL_TOOL_ANNOTATIONS,
   toolNames,
   workspaceIdDescription,
+  type ToolLogFields,
   type ToolRegistrationContext,
 } from "./types.js";
 import {
@@ -113,6 +114,11 @@ function registerApplyPatchTool(context: ToolRegistrationContext): void {
           const workspace = workspaces.getWorkspace(workspaceId);
           return applyPatch(workspace.root, patch);
         },
+        (result) => ({
+          files: result.files.map((file) => file.path),
+          additions: result.additions,
+          removals: result.removals,
+        }),
       );
       const paths = applied.files.map((file) => file.path).join(", ");
       const result = `Applied patch to ${applied.files.length} file(s): ${paths}`;
@@ -228,6 +234,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
             maxOutputTokens,
           });
         },
+        processLogFields,
       );
 
       return processToolResponse(snapshot);
@@ -299,7 +306,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       const startedAt = performance.now();
       const snapshot = await runLoggedToolOperation(
         config,
-        { tool: "write_stdin", workspaceId },
+        { tool: "write_stdin", workspaceId, sessionId, inputLength: chars?.length ?? 0 },
         startedAt,
         async () => {
           workspaces.getWorkspace(workspaceId);
@@ -313,9 +320,24 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
             maxOutputTokens,
           });
         },
+        processLogFields,
       );
 
       return processToolResponse(snapshot);
     },
   );
+}
+
+export function processLogFields(result: ProcessSnapshot): Partial<ToolLogFields> {
+  const success = result.running || result.exitCode === 0;
+  const termination = result.signal
+    ? `Process terminated by signal ${result.signal}.`
+    : `Process exited with code ${result.exitCode ?? "unknown"}.`;
+  return {
+    sessionId: result.sessionId,
+    running: result.running,
+    exitCode: result.exitCode,
+    success,
+    ...(success ? {} : { error: termination }),
+  };
 }

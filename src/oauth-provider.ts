@@ -10,7 +10,7 @@ import type {
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { checkResourceAllowed, resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
-import { SqliteOAuthClientsStore, SqliteOAuthStore } from "./oauth-store.js";
+import { SqliteOAuthClientsStore, SqliteOAuthStore, type OAuthAuthorizationState } from "./oauth-store.js";
 
 export interface OAuthConfig {
   ownerToken: string;
@@ -254,6 +254,10 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     const hashed = hashToken(request.token);
     this.oauthStore.deleteAccessToken(hashed);
     this.oauthStore.deleteRefreshToken(hashed);
+  }
+
+  getAuthorizationState(): OAuthAuthorizationState {
+    return this.oauthStore.getAuthorizationState();
   }
 
   close(): void {

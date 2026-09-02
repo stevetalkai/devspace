@@ -133,6 +133,13 @@ test("persisted checkout and worktree sessions restore after recreating the regi
   }
 });
 
+test("current resolves to the sole workspace already opened in this server", async (t) => {
+  const context = await fixture(t);
+  const opened = await context.registry.openWorkspace(context.root);
+
+  assert.equal(context.registry.getWorkspace("current").id, opened.workspace.id);
+});
+
 test("workspace paths outside the allowed roots are rejected", async (t) => {
   const context = await fixture(t);
 

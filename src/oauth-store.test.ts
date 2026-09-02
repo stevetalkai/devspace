@@ -84,6 +84,7 @@ function testPersistenceAndTokenHashing(stateDir: string): void {
       resource: mcpUrl.href,
     },
   });
+  assert.deepEqual(firstStore.getAuthorizationState(), { authorizedClientCount: 1 });
   firstStore.close();
 
   const database = openDatabase(stateDir);
@@ -110,6 +111,7 @@ function testPersistenceAndTokenHashing(stateDir: string): void {
     assert.equal(restoredClient?.client_id, client.client_id);
     assert.equal(restoredStore.getAccessToken(hashToken(accessToken))?.resource, mcpUrl.href);
     assert.equal(restoredStore.getRefreshToken(hashToken(refreshToken))?.clientId, client.client_id);
+    assert.deepEqual(restoredStore.getAuthorizationState(), { authorizedClientCount: 1 });
   } finally {
     restoredStore.close();
   }
@@ -133,6 +135,7 @@ function testExpiredTokenCleanup(stateDir: string): void {
   try {
     assert.equal(reopened.getAccessToken("expired-access-hash"), undefined);
     assert.equal(reopened.getRefreshToken("expired-refresh-hash"), undefined);
+    assert.deepEqual(reopened.getAuthorizationState(), { authorizedClientCount: 0 });
   } finally {
     reopened.close();
   }

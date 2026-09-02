@@ -243,13 +243,16 @@ export class WorkspaceRegistry {
   }
 
   getWorkspace(workspaceId: string): Workspace {
-    const workspace = this.workspaces.get(workspaceId);
+    const resolvedWorkspaceId = workspaceId === "current" && this.workspaces.size === 1
+      ? this.workspaces.keys().next().value as string
+      : workspaceId;
+    const workspace = this.workspaces.get(resolvedWorkspaceId);
     if (workspace) {
-      this.store?.touchSession(workspaceId);
+      this.store?.touchSession(resolvedWorkspaceId);
       return workspace;
     }
 
-    const session = this.store?.getSession(workspaceId);
+    const session = this.store?.getSession(resolvedWorkspaceId);
     if (!session) {
       throw new Error(
         `Unknown workspaceId: ${workspaceId}. Open the target project or worktree again and continue with the new workspaceId.`,
@@ -277,7 +280,7 @@ export class WorkspaceRegistry {
       agentProfiles: [],
       activatedSkillDirs: new Set(),
     };
-    this.store?.touchSession(workspaceId);
+    this.store?.touchSession(resolvedWorkspaceId);
     this.workspaces.set(restoredWorkspace.id, restoredWorkspace);
 
     return restoredWorkspace;

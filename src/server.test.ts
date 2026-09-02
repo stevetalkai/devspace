@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -13,12 +13,25 @@ import { buildLocalAgentProviderStatuses } from "./local-agent-catalog.js";
 import type { SubagentsConfig } from "./local-agent-config.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { ProcessSessionManager } from "./process-sessions.js";
-import { createMcpServer } from "./server.js";
+import { createMcpServer, jsonRpcToolNames } from "./server.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
 import { WorkspaceRegistry } from "./workspaces.js";
 import { writeTestDevspaceConfig } from "./test-support/config.test.js";
 
 const execFileAsync = promisify(execFile);
+
+test("MCP request logging extracts only tool names", () => {
+  assert.deepEqual(jsonRpcToolNames({
+    jsonrpc: "2.0",
+    method: "tools/call",
+    params: { name: "read", arguments: { path: "private.txt" } },
+  }), ["read"]);
+  assert.equal(jsonRpcToolNames({
+    jsonrpc: "2.0",
+    method: "resources/read",
+    params: { name: "secret" },
+  }), undefined);
+});
 
 test("tool modes expose the expected host-facing tool surface", async (t) => {
   const cases: Array<{
@@ -228,6 +241,31 @@ test("open_workspace keeps lifecycle flags out of model output and preserves com
   assert.ok(Array.isArray(card.agents));
 });
 
+test("open_workspace defaults to the sole project authorized by DevSpace Desktop", async (t) => {
+  const context = await fixture(t);
+  const result = await context.client.callTool({
+    name: "open_workspace",
+    arguments: {},
+    _meta: { "openai/session": "chat-default-project" },
+  });
+
+  assert.equal(structuredContent(result).root, context.allowedRoot);
+
+  const nullFieldsResult = await context.client.callTool({
+    name: "open_workspace",
+    arguments: { path: null, mode: null, baseRef: null },
+    _meta: { "openai/session": "chat-null-default-project" },
+  });
+  assert.equal(structuredContent(nullFieldsResult).root, context.allowedRoot);
+
+  const guessedPathResult = await context.client.callTool({
+    name: "open_workspace",
+    arguments: { path: dirname(context.allowedRoot) },
+    _meta: { "openai/session": "chat-guessed-project" },
+  });
+  assert.equal(structuredContent(guessedPathResult).root, context.allowedRoot);
+});
+
 test("open_workspace refreshes provider availability for each catalog", async (t) => {
   let available = false;
   const context = await fixture(t, {
@@ -290,6 +328,7 @@ test("open_workspace scopes checkout reuse to OpenAI session metadata", async (t
 interface ServerFixture {
   client: Client;
   project: string;
+  allowedRoot: string;
 }
 
 async function fixture(
@@ -394,7 +433,7 @@ async function fixture(
     await rm(root, { recursive: true, force: true });
   });
 
-  return { client, project };
+  return { client, project, allowedRoot: root };
 }
 
 async function git(cwd: string, args: string[]): Promise<void> {

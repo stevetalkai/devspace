@@ -41,6 +41,7 @@ import {
 import { ProcessSessionManager } from "./process-sessions.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { openAiConversationScopeId } from "./request-meta.js";
+import { isPathInsideRoot } from "./roots.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
 import { formatPathForPrompt } from "./skills.js";
 import { createWorkspaceStore } from "./workspace-store.js";
@@ -60,6 +61,7 @@ import {
   logFailedToolResponse,
   logToolCall,
   resultOutputSchema,
+  runLoggedToolOperation,
   textBlock,
   workspaceAppDescriptorMeta,
 } from "./tool-surfaces/shared.js";
@@ -107,7 +109,7 @@ function serverInstructions(
     ? `When ${toolNames.openWorkspace} returns available skills and a task matches a skill, use ${toolNames.read} to read that skill's path before proceeding. Skill paths may be outside the workspace, but ${toolNames.read} only permits advertised SKILL.md files and files under already-loaded skill directories. `
     : "";
   const agents = `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in availableAgentsFiles, use ${toolNames.read} to inspect that instruction file and follow it. `;
-  const common = `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected.`;
+  const common = `Use DevSpace for coding work. When no workspace is open and the user asks about the current directory, available files, or starts work without supplying a path, call ${toolNames.openWorkspace} with no path instead of claiming that no directory is authorized. It automatically opens the sole project authorized in DevSpace Desktop; if several projects are authorized, its error lists the choices so the user can select one. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected.`;
 
   return `${common} ${toolSurface.instructions({ agents, skills })}${artifactInstruction}${showChangesInstruction}`;
 }
@@ -189,6 +191,31 @@ function requestLogFields(req: Request, config: ServerConfig): Record<string, un
     referer: req.header("referer"),
     contentLength: req.header("content-length"),
   };
+}
+
+function jsonRpcMethods(body: unknown): string[] | undefined {
+  const messages = Array.isArray(body) ? body : [body];
+  const methods = messages
+    .flatMap((message) => {
+      if (!message || typeof message !== "object" || !("method" in message)) return [];
+      return typeof message.method === "string" ? [message.method] : [];
+    })
+    .slice(0, 10);
+  return methods.length > 0 ? methods : undefined;
+}
+
+export function jsonRpcToolNames(body: unknown): string[] | undefined {
+  const messages = Array.isArray(body) ? body : [body];
+  const tools = messages
+    .flatMap((message) => {
+      if (!message || typeof message !== "object") return [];
+      if (!("method" in message) || message.method !== "tools/call") return [];
+      if (!("params" in message) || !message.params || typeof message.params !== "object") return [];
+      if (!("name" in message.params) || typeof message.params.name !== "string") return [];
+      return [message.params.name];
+    })
+    .slice(0, 10);
+  return tools.length > 0 ? tools : undefined;
 }
 
 function assetBaseUrl(config: ServerConfig): string {
@@ -337,21 +364,25 @@ export function createMcpServer(
     {
       title: "Open workspace",
       description:
-        "Start work in a project directory or isolated worktree when no usable workspaceId exists for it. During continued work, reuse the existing workspaceId instead of calling this tool again. By default this uses the actual checkout; set mode=\"worktree\" for isolated or parallel work.",
+        "Start work in a project authorized by DevSpace Desktop when no usable workspaceId exists. When exactly one project is authorized, it always opens automatically and path is ignored; do not guess a filesystem path. When multiple projects are authorized, use the exact authorized path selected by the user. During continued work, reuse the existing workspaceId instead of calling this tool again. By default this uses the actual checkout; set mode=\"worktree\" for isolated or parallel work.",
       inputSchema: {
         path: z
           .string()
+          .nullable()
+          .optional()
           .describe(
-            "Absolute path, or a leading-tilde home path such as ~/project, to a project directory inside an allowed root.",
+            "Absolute path, or a leading-tilde home path such as ~/project, to a project directory inside an allowed root. Omit when the user has not named a project.",
           ),
         mode: z
           .enum(["checkout", "worktree"])
+          .nullable()
           .optional()
           .describe(
             "Defaults to checkout, which works in the actual directory. Use worktree for isolated or parallel Git work.",
           ),
         baseRef: z
           .string()
+          .nullable()
           .optional()
           .describe("Git ref to base a worktree on. Only used with mode=\"worktree\". Defaults to HEAD."),
       },
@@ -390,6 +421,8 @@ export function createMcpServer(
     },
     async ({ path, mode, baseRef }, { _meta }) => {
       const startedAt = performance.now();
+      try {
+      const selectedPath = selectAuthorizedProject(path, config.allowedRoots);
       const {
         workspace,
         agentsFiles,
@@ -397,7 +430,7 @@ export function createMcpServer(
         workspaceReused,
         includeBootstrapContext,
       } = await workspaces.openWorkspace(
-        { path, mode, baseRef },
+        { path: selectedPath, mode: mode ?? undefined, baseRef: baseRef ?? undefined },
         { conversationScopeId: openAiConversationScopeId(_meta) },
       );
       const review = await reviewCheckpoints.initializeWorkspace({
@@ -536,6 +569,15 @@ export function createMcpServer(
           instruction,
         },
       };
+      } catch (error) {
+        logToolCall(config, {
+          tool: "open_workspace",
+          success: false,
+          durationMs: Math.round(performance.now() - startedAt),
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      }
     },
   );
 
@@ -646,29 +688,35 @@ export function createMcpServer(
     },
     async ({ workspaceId }, { _meta }) => {
       const startedAt = performance.now();
-      const workspace = workspaces.getWorkspace(workspaceId);
-      const reviewRef = typeof _meta?.["devspace/reviewRef"] === "string"
-        ? _meta["devspace/reviewRef"]
-        : undefined;
-      const review = reviewRef
-        ? await reviewCheckpoints.reviewByRef({
-            workspaceId,
-            root: workspace.root,
-            reviewRef,
-          })
-        : await reviewCheckpoints.reviewChanges({
-            workspaceId,
-            root: workspace.root,
-            markReviewed: true,
-          });
+      const review = await runLoggedToolOperation(
+        config,
+        { tool: "show_changes", workspaceId },
+        startedAt,
+        async () => {
+          const workspace = workspaces.getWorkspace(workspaceId);
+          const reviewRef = typeof _meta?.["devspace/reviewRef"] === "string"
+            ? _meta["devspace/reviewRef"]
+            : undefined;
+          return reviewRef
+            ? reviewCheckpoints.reviewByRef({
+                workspaceId,
+                root: workspace.root,
+                reviewRef,
+              })
+            : reviewCheckpoints.reviewChanges({
+                workspaceId,
+                root: workspace.root,
+                markReviewed: true,
+              });
+        },
+        (result) => ({
+          files: result.files.map((file) => file.path),
+          additions: result.summary.additions,
+          removals: result.summary.removals,
+        }),
+      );
 
       const content = [textBlock(review.result)];
-      logToolCall(config, {
-        tool: "show_changes",
-        workspaceId,
-        success: true,
-        durationMs: Math.round(performance.now() - startedAt),
-      });
 
       return {
         content,
@@ -702,6 +750,26 @@ export function createMcpServer(
   return server;
 }
 
+function defaultAuthorizedProject(allowedRoots: readonly string[]): string {
+  if (allowedRoots.length === 1) return allowedRoots[0]!;
+  if (allowedRoots.length === 0) {
+    throw new Error("No project is authorized in DevSpace Desktop. Add a project there first.");
+  }
+  throw new Error(
+    `More than one project is authorized in DevSpace Desktop. Ask the user to choose one, then call open_workspace with its path: ${allowedRoots.join(", ")}`,
+  );
+}
+
+function selectAuthorizedProject(
+  requestedPath: string | null | undefined,
+  allowedRoots: readonly string[],
+): string {
+  const trimmedPath = requestedPath?.trim();
+  if (!trimmedPath) return defaultAuthorizedProject(allowedRoots);
+  if (allowedRoots.some((root) => isPathInsideRoot(trimmedPath, root))) return trimmedPath;
+  return allowedRoots.length === 1 ? allowedRoots[0]! : trimmedPath;
+}
+
 export interface CreateServerOptions {
   incomingArtifactAdapters?: readonly IncomingArtifactAdapter[];
 }
@@ -723,6 +791,10 @@ export function createServer(
   const mcpUrl = new URL("/mcp", config.publicBaseUrl);
   const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
   const oauthProvider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir);
+  const oauthAuthorizationState = oauthProvider.getAuthorizationState();
+  logEvent(config.logging, "info", "oauth_authorization_state", {
+    authorizedClientCount: oauthAuthorizationState.authorizedClientCount,
+  });
   const bearerAuth = requireBearerAuth({
     verifier: oauthProvider,
     requiredScopes: [config.oauth.scopes[0] ?? "devspace"],
@@ -857,6 +929,8 @@ export function createServer(
     logEvent(config.logging, "debug", "mcp_request", {
       requestId,
       method: req.method,
+      jsonRpcMethods: jsonRpcMethods(req.body),
+      toolNames: jsonRpcToolNames(req.body),
       sessionIdPresent: Boolean(sessionId),
       sessionIdPrefix: sessionIdPrefix(sessionId),
       isInitialize: initializeRequest,

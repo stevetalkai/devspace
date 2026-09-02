@@ -25,6 +25,10 @@ export interface PersistedTokenPair {
   refreshToken: PersistedRefreshTokenRecord;
 }
 
+export interface OAuthAuthorizationState {
+  authorizedClientCount: number;
+}
+
 function redirectHostAllowed(redirectUri: string, allowedHosts: string[]): boolean {
   let parsed: URL;
   try {
@@ -171,6 +175,21 @@ export class SqliteOAuthStore {
       | undefined;
 
     return row ? rowToRefreshTokenRecord(row) : undefined;
+  }
+
+  getAuthorizationState(nowSeconds = Math.floor(Date.now() / 1000)): OAuthAuthorizationState {
+    const row = this.database.sqlite
+      .prepare(
+        `select count(distinct client_id) as authorized_client_count
+         from (
+           select client_id from oauth_access_tokens where expires_at >= ?
+           union
+           select client_id from oauth_refresh_tokens where expires_at >= ?
+         )`,
+      )
+      .get(nowSeconds, nowSeconds) as { authorized_client_count: number };
+
+    return { authorizedClientCount: row.authorized_client_count };
   }
 
   deleteRefreshToken(tokenHash: string): void {
